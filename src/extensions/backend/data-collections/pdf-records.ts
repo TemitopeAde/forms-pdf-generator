@@ -15,6 +15,8 @@ export default {
     { key: 'templateVersion', type: 'NUMBER', displayName: 'templateVersion' },
     { key: 'fileId', type: 'TEXT', displayName: 'fileId' },
     { key: 'status', type: 'TEXT', displayName: 'status' },
+    { key: 'usagePeriod', type: 'TEXT', displayName: 'usagePeriod' },
+    { key: 'mode', type: 'TEXT', displayName: 'mode' },
     { key: 'errorCode', type: 'TEXT', displayName: 'errorCode' },
     { key: 'createdAt', type: 'DATETIME', displayName: 'createdAt' },
   ],

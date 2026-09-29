@@ -5,6 +5,7 @@ import { normalizeAnswers } from './normalize';
 import { renderPdf, type PdfTemplateConfig } from './render-pdf';
 import { getPrivateDownloadUrl, getWixContext, getWixForm, getWixSubmission, listWixForms, listWixSubmissions, readPrivateFile, resolveWixMedia, uploadPrivateFile, uploadPrivatePdf } from './wix';
 import { makeZip } from './zip';
+import { deliverPdf, validateDelivery } from './delivery';
 
 export type Feature = 'pdf_generation' | 'bulk_pdf' | 'automation' | 'email_pdf' | 'webhooks' | 'remove_branding';
 export type Plan = 'free' | 'pro' | 'business';
@@ -35,19 +36,21 @@ export async function getOverview(instanceId: string) {
   const plan = planFromWix(context.isFree, context.planName);
   if (!context.installed) {
     const settings = await findOne('app-settings', instanceId, 'instanceId', instanceId);
-    return { context, plan, forms: [], recentSubmissions: [], formSettings: [], templates: [], pdfRecords: [], logs: [], usage: 0, settings };
+    return { context, plan, forms: [], recentSubmissions: [], formSettings: [], templates: [], pdfRecords: [], exportJobs: [], logs: [], actions: [], usage: 0, settings };
   }
-  const [forms, recentSubmissions, formSettings, templates, pdfRecords, logs, usage, settings] = await Promise.all([
+  const [forms, recentSubmissions, formSettings, templates, pdfRecords, exportJobs, logs, actions, usage, settings] = await Promise.all([
     listWixForms(),
     listWixSubmissions(undefined, 10),
     listItems('form-settings', instanceId),
     listItems('pdf-templates', instanceId),
     listItems('pdf-records', instanceId),
+    listItems('export-jobs', instanceId),
     listItems('processed-events', instanceId),
+    listItems('automation-actions', instanceId),
     countItems('usage-records', instanceId, 'period', new Date().toISOString().slice(0, 7)),
     findOne('app-settings', instanceId, 'instanceId', instanceId),
   ]);
-  return { context, plan, forms, recentSubmissions: recentSubmissions.items, formSettings, templates, pdfRecords, logs, usage, settings };
+  return { context, plan, forms, recentSubmissions: recentSubmissions.items, formSettings, templates, pdfRecords, exportJobs, logs, actions, usage, settings };
 }
 
 export async function setAppLocale(instanceId: string, locale: string) {
@@ -145,8 +148,15 @@ export async function configureForm(instanceId: string, formId: string, input: {
     const context = await getWixContext();
     if (!canUseFeature(planFromWix(context.isFree, context.planName), 'automation')) throw new Error('PLAN_REQUIRED');
   }
+  const delivery = input.delivery === undefined ? undefined : validateDelivery(input.delivery);
+  if (delivery) {
+    const context = await getWixContext();
+    const plan = planFromWix(context.isFree, context.planName);
+    if ((delivery.emailOwner || delivery.emailSubmitter || delivery.recipients?.length) && !canUseFeature(plan, 'email_pdf')) throw new Error('PLAN_REQUIRED');
+    if (delivery.webhookUrl && !canUseFeature(plan, 'webhooks')) throw new Error('PLAN_REQUIRED');
+  }
   const existing = await findOne('form-settings', instanceId, 'formId', formId);
-  const data = { uniqueKey: `${instanceId}:${formId}`, formId, ...input };
+  const data = { uniqueKey: `${instanceId}:${formId}`, formId, ...input, ...(delivery === undefined ? {} : { delivery }) };
   return existing ? updateItem('form-settings', instanceId, existing._id, data) : createItem('form-settings', instanceId, data);
 }
 
@@ -155,8 +165,6 @@ export async function generateSubmissionPdf(instanceId: string, submissionId: st
   const plan = planFromWix(context.isFree, context.planName);
   if (mode === 'automatic' && !canUseFeature(plan, 'automation')) throw new Error('PLAN_REQUIRED');
   const usagePeriod = new Date().toISOString().slice(0, 7);
-  const usage = await countItems('usage-records', instanceId, 'period', usagePeriod);
-  if (usage >= PLAN_LIMITS[plan]) throw new Error('MONTHLY_PDF_LIMIT');
 
   const submission = await getWixSubmission(submissionId);
   if (submission.status !== 'CONFIRMED') throw new Error('SUBMISSION_NOT_CONFIRMED');
@@ -172,10 +180,12 @@ export async function generateSubmissionPdf(instanceId: string, submissionId: st
   const version = Number(templateRecord?.version ?? 1);
   const uniqueKey = `${instanceId}:${submissionId}:${templateId}:${version}`;
   const existing = await findOne('pdf-records', instanceId, 'uniqueKey', uniqueKey);
-  if (existing?.status === 'ready') return existing;
-  const claimed = existing ?? await claimUnique('pdf-records', instanceId, uniqueKey, {
+  if (existing && ['ready', 'uploading', 'processing'].includes(String(existing.status))) return existing;
+  const usage = await countItems('usage-records', instanceId, 'period', usagePeriod);
+  if (usage >= PLAN_LIMITS[plan]) throw new Error('MONTHLY_PDF_LIMIT');
+  const claimed = existing ? await updateItem('pdf-records', instanceId, existing._id, { status: 'processing', errorCode: '' }) : await claimUnique('pdf-records', instanceId, uniqueKey, {
     formId: submission.formId, submissionId, templateId, templateVersion: version,
-    status: 'processing', createdAt: new Date(),
+    status: 'processing', mode, usagePeriod, createdAt: new Date(),
   });
   if (!claimed) return await findOne('pdf-records', instanceId, 'uniqueKey', uniqueKey);
 
@@ -188,9 +198,9 @@ export async function generateSubmissionPdf(instanceId: string, submissionId: st
       submissionId, submittedAt: submission._createdDate?.toISOString(), answers, template,
       resolveFile: resolveWixMedia,
     });
-    const fileId = await uploadPrivatePdf(pdf, `form-${submissionId}.pdf`);
-    const saved = await updateItem('pdf-records', instanceId, claimed._id, { status: 'ready', fileId, errorCode: '' });
-    await claimUnique('usage-records', instanceId, uniqueKey, { period: usagePeriod, pdfCount: 1 });
+    const fileId = await uploadPrivatePdf(pdf, `form-${submissionId}.pdf`, claimed._id);
+    const current = await findOne('pdf-records', instanceId, '_id', claimed._id);
+    const saved = current?.status === 'ready' ? current : await updateItem('pdf-records', instanceId, claimed._id, { status: 'uploading', fileId, errorCode: '' });
     return saved;
   } catch (error) {
     await updateItem('pdf-records', instanceId, claimed._id, { status: 'failed', errorCode: error instanceof Error ? error.message.slice(0, 100) : 'UNKNOWN' });
@@ -217,8 +227,9 @@ export async function createExportZip(instanceId: string, recordIds: string[]) {
       bytes: await readPrivateFile(String(record!.fileId), 9 * 1024 * 1024),
     })));
     const zip = makeZip(files);
-    const fileId = await uploadPrivateFile(zip, `forms-pdf-export-${job._id}.zip`, 'application/zip');
-    return updateItem('export-jobs', instanceId, job._id, { status: 'ready', fileId, completedAt: new Date() });
+    const fileId = await uploadPrivateFile(zip, `forms-pdf-export-${job._id}.zip`, 'application/zip', job._id);
+    const current = await findOne('export-jobs', instanceId, '_id', job._id);
+    return current?.status === 'ready' ? current : updateItem('export-jobs', instanceId, job._id, { status: 'uploading', fileId });
   } catch (error) {
     await updateItem('export-jobs', instanceId, job._id, { status: 'failed', errorCode: error instanceof Error ? error.message.slice(0, 100) : 'UNKNOWN', completedAt: new Date() });
     throw error;
@@ -229,6 +240,12 @@ export async function downloadExportZip(instanceId: string, jobId: string) {
   const job = await findOne('export-jobs', instanceId, '_id', jobId);
   if (!job || job.status !== 'ready' || typeof job.fileId !== 'string') throw new Error('ZIP_NOT_READY');
   return getPrivateDownloadUrl(job.fileId);
+}
+
+export async function getExportJob(instanceId: string, jobId: string) {
+  const job = await findOne('export-jobs', instanceId, '_id', jobId);
+  if (!job) throw new Error('ZIP_JOB_NOT_FOUND');
+  return job;
 }
 
 export async function getBillingStatus(instanceId: string) {
@@ -256,10 +273,14 @@ export async function processSubmissionEvent(event: unknown, type: 'created' | '
   const submissionId = String(entity?.id ?? envelope.entityId ?? '');
   if (!eventId || !submissionId) throw new Error('EVENT_INVALID');
   const key = `${instanceId}:${eventId}`;
-  const claimed = await claimUnique('processed-events', instanceId, key, {
+  let claimed = await claimUnique('processed-events', instanceId, key, {
     eventId, eventType: type, submissionId, formId: entity?.formId ?? '', status: 'processing', attemptCount: 1, receivedAt: new Date(),
   });
-  if (!claimed) return;
+  if (!claimed) {
+    const previous = await findOne('processed-events', instanceId, 'uniqueKey', key);
+    if (!previous || previous.status !== 'failed') return;
+    claimed = await updateItem('processed-events', instanceId, previous._id, { status: 'processing', attemptCount: Number(previous.attemptCount ?? 1) + 1, errorCode: '' });
+  }
   try {
     const submission = entity?.namespace === 'wix.form_app.form' ? entity : await getWixSubmission(submissionId);
     if (submission.namespace !== 'wix.form_app.form' || submission.status !== 'CONFIRMED' || !submission.formId) {
@@ -277,4 +298,61 @@ export async function processSubmissionEvent(event: unknown, type: 'created' | '
     await updateItem('processed-events', instanceId, claimed._id, { status: 'failed', errorCode: error instanceof Error ? error.message.slice(0, 100) : 'UNKNOWN', processedAt: new Date() });
     throw error;
   }
+}
+
+type MediaEvent = { data?: { file?: { _id?: string }; externalInfo?: { origin?: string; externalIds?: string[] }; error?: { code?: string } } };
+
+async function mediaTarget(event: MediaEvent) {
+  const info = event.data?.externalInfo;
+  const origin = info?.origin;
+  if (origin !== 'forms-pdf-pdf' && origin !== 'forms-pdf-zip') return null;
+  const id = info?.externalIds?.[0];
+  if (!id || !/^[\w-]{6,128}$/.test(id)) return null;
+  const token = await auth.getTokenInfo();
+  if (!token.active || !token.instanceId) throw new Error('INSTANCE_MISSING');
+  const name = origin === 'forms-pdf-pdf' ? 'pdf-records' : 'export-jobs';
+  const record = await findOne(name, token.instanceId, '_id', id);
+  return record ? { instanceId: token.instanceId, name, record } : null;
+}
+
+export async function processMediaReady(event: MediaEvent) {
+  const target = await mediaTarget(event);
+  if (!target) return;
+  const fileId = event.data?.file?._id;
+  if (!fileId) throw new Error('MEDIA_FILE_ID_MISSING');
+  const { instanceId, name, record } = target;
+  if (record.fileId && record.fileId !== fileId) return;
+  const ready = await updateItem(name, instanceId, record._id, { status: 'ready', fileId, errorCode: '', completedAt: new Date() });
+  if (name !== 'pdf-records') return;
+  const usagePeriod = typeof ready.usagePeriod === 'string' ? ready.usagePeriod : new Date().toISOString().slice(0, 7);
+  await claimUnique('usage-records', instanceId, String(ready.uniqueKey), { period: usagePeriod, pdfCount: 1 });
+  if (ready.mode !== 'automatic') return;
+  const formSettings = await findOne('form-settings', instanceId, 'formId', String(ready.formId));
+  if (!formSettings?.delivery) return;
+  const delivery = validateDelivery(formSettings.delivery);
+  const submission = await getWixSubmission(String(ready.submissionId));
+  const form = await getWixForm(String(ready.formId));
+  await deliverPdf({ instanceId, submissionId: String(ready.submissionId), formId: String(ready.formId), record: ready, answers: normalizeAnswers(form, submission), delivery });
+}
+
+export async function processMediaFailed(event: MediaEvent) {
+  const target = await mediaTarget(event);
+  if (!target) return;
+  await updateItem(target.name, target.instanceId, target.record._id, { status: 'failed', errorCode: event.data?.error?.code?.slice(0, 100) || 'MEDIA_PROCESSING_FAILED', completedAt: new Date() });
+}
+
+export async function retryAutomation(instanceId: string, kind: 'event' | 'action', recordId: string) {
+  if (kind === 'event') {
+    const record = await findOne('processed-events', instanceId, '_id', recordId);
+    if (!record || record.status !== 'failed') throw new Error('EVENT_NOT_RETRYABLE');
+    await processSubmissionEvent({ id: record.eventId, entityId: record.submissionId }, record.eventType === 'updated' ? 'updated' : 'created');
+    return await findOne('processed-events', instanceId, '_id', recordId);
+  }
+  const action = await findOne('automation-actions', instanceId, '_id', recordId);
+  if (!action || action.status !== 'failed') throw new Error('ACTION_NOT_RETRYABLE');
+  const pdfRecordId = String(action.actionType ?? '').split(':')[0];
+  const pdf = await findOne('pdf-records', instanceId, '_id', pdfRecordId);
+  if (!pdf || pdf.status !== 'ready' || typeof pdf.fileId !== 'string') throw new Error('PDF_NOT_READY');
+  await processMediaReady({ data: { file: { _id: pdf.fileId }, externalInfo: { origin: 'forms-pdf-pdf', externalIds: [pdfRecordId] } } });
+  return await findOne('automation-actions', instanceId, '_id', recordId);
 }

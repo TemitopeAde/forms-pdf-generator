@@ -4,7 +4,7 @@ const string = { type: 'string' } as const;
 const object = { type: 'object', properties: {} } as const;
 const tool = (methodName: string, displayName: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []) => ({
   methodName, displayName, description, activated: true,
-  requestSchema: { type: 'object', properties: ['saveTemplate', 'generatePdf', 'configureAutomation', 'setLanguage', 'deleteTemplate', 'createZip', 'getCheckoutLink', 'setDefaultTemplate'].includes(methodName) ? { ...properties, confirmed: { type: 'boolean', description: 'Set true only after the Wix user explicitly confirms this action.' } } : properties, required: ['saveTemplate', 'generatePdf', 'configureAutomation', 'setLanguage', 'deleteTemplate', 'createZip', 'getCheckoutLink', 'setDefaultTemplate'].includes(methodName) ? [...required, 'confirmed'] : required, additionalProperties: false },
+  requestSchema: { type: 'object', properties: ['saveTemplate', 'generatePdf', 'configureAutomation', 'setLanguage', 'deleteTemplate', 'createZip', 'getCheckoutLink', 'setDefaultTemplate', 'retryAutomation'].includes(methodName) ? { ...properties, confirmed: { type: 'boolean', description: 'Set true only after the Wix user explicitly confirms this action.' } } : properties, required: ['saveTemplate', 'generatePdf', 'configureAutomation', 'setLanguage', 'deleteTemplate', 'createZip', 'getCheckoutLink', 'setDefaultTemplate', 'retryAutomation'].includes(methodName) ? [...required, 'confirmed'] : required, additionalProperties: false },
   responseSchema: object,
 });
 
@@ -24,9 +24,11 @@ export default extensions.appTools({
     tool('generatePdf', 'Generate submission PDF', 'Generate a PDF for a confirmed Wix Form submission. Confirm generation with the user before invoking.', { submissionId: string }, ['submissionId']),
     tool('getPdfDownload', 'Get PDF download link', 'Return a short-lived secure link for a previously generated PDF.', { recordId: string }, ['recordId']),
     tool('createZip', 'Create PDF ZIP export', 'Create a private ZIP from 1 to 5 previously generated PDFs. Confirm with the user before invoking.', { recordIds: { type: 'array', items: string, minItems: 1, maxItems: 5 } }, ['recordIds']),
+    tool('getZipJob', 'Get ZIP export status', 'Check whether a PDF ZIP export is ready, uploading, or failed.', { jobId: string }, ['jobId']),
     tool('getZipDownload', 'Get ZIP download link', 'Return a short-lived secure link for a completed PDF ZIP export.', { jobId: string }, ['jobId']),
-    tool('configureAutomation', 'Configure form automation', 'Set the PDF template and automatic PDF generation for one form. Confirm changes with the user before invoking.', { formId: string, templateId: string, automatic: { type: 'boolean' } }, ['formId']),
+    tool('configureAutomation', 'Configure form automation', 'Set PDF template, automatic generation, and opt-in email or webhook delivery for one form. At most two email recipients are supported. Confirm changes with the user before invoking.', { formId: string, templateId: string, automatic: { type: 'boolean' }, delivery: { type: 'object', properties: { emailOwner: { type: 'boolean' }, emailSubmitter: { type: 'boolean' }, recipients: { type: 'array', items: string, maxItems: 2 }, webhookUrl: string } } }, ['formId']),
     tool('listAutomationLogs', 'List automation logs', 'List recent form event processing results and errors.'),
+    tool('retryAutomation', 'Retry failed automation', 'Retry one failed form event or delivery action. Confirm outbound actions with the user before invoking.', { kind: { type: 'string', enum: ['event', 'action'] }, recordId: string }, ['kind', 'recordId']),
     tool('getSettings', 'Get app settings', 'Get the selected dashboard language and app settings.'),
     tool('setLanguage', 'Set dashboard language', 'Set the dashboard language for this Wix app instance. Confirm with the user before invoking.', { locale: string }, ['locale']),
     tool('getBillingStatus', 'Get billing status', 'Get Wix billing plan and monthly PDF usage.'),

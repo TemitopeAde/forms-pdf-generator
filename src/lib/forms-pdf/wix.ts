@@ -61,10 +61,11 @@ export async function resolveWixMedia(reference: string): Promise<{ bytes: Uint8
   return bytes.length <= 8 * 1024 * 1024 ? { bytes, mimeType: response.headers.get('content-type') ?? undefined } : null;
 }
 
-export async function uploadPrivateFile(bytes: Uint8Array, fileName: string, mimeType: 'application/pdf' | 'application/zip'): Promise<string> {
+export async function uploadPrivateFile(bytes: Uint8Array, fileName: string, mimeType: 'application/pdf' | 'application/zip', ownerId?: string): Promise<string> {
   if (bytes.length > 10 * 1024 * 1024) throw new Error('FILE_SIZE_LIMIT');
   const generate = auth.elevate(files.generateFileUploadUrl);
-  const { uploadUrl } = await generate(mimeType, { fileName, sizeInBytes: String(bytes.length), private: true });
+  const { uploadUrl } = await generate(mimeType, { fileName, sizeInBytes: String(bytes.length), private: true,
+    externalInfo: ownerId ? { origin: mimeType === 'application/pdf' ? 'forms-pdf-pdf' : 'forms-pdf-zip', externalIds: [ownerId] } : undefined });
   if (!uploadUrl) throw new Error('UPLOAD_URL_UNAVAILABLE');
   const response = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': mimeType }, body: new Uint8Array(bytes).buffer, redirect: 'error' });
   if (!response.ok) throw new Error('FILE_UPLOAD_FAILED');
@@ -75,7 +76,7 @@ export async function uploadPrivateFile(bytes: Uint8Array, fileName: string, mim
   return fileId;
 }
 
-export const uploadPrivatePdf = (bytes: Uint8Array, fileName: string) => uploadPrivateFile(bytes, fileName, 'application/pdf');
+export const uploadPrivatePdf = (bytes: Uint8Array, fileName: string, recordId?: string) => uploadPrivateFile(bytes, fileName, 'application/pdf', recordId);
 
 export async function getPrivateDownloadUrl(fileId: string, inline = false, expirationInMinutes = 5): Promise<string> {
   const getUrl = auth.elevate(files.generateFileDownloadUrl);

@@ -41,12 +41,37 @@ function wrappedLines(text: string, font: PDFFont, size: number, maxWidth: numbe
       if (font.widthOfTextAtSize(candidate, size) <= maxWidth) line = candidate;
       else {
         if (line) result.push(line);
-        line = word;
+        line = '';
+        for (const character of word) {
+          if (line && font.widthOfTextAtSize(line + character, size) > maxWidth) {
+            result.push(line);
+            line = '';
+          }
+          line += character;
+        }
       }
     }
     result.push(line);
   }
   return result;
+}
+
+function templateValue(input: PdfInput, value: string): string {
+  const field = (name: string) => input.answers.find((answer) =>
+    answer.kind === 'text' && [answer.target, answer.label].some((part) =>
+      part.toLowerCase().replace(/[^a-z]/g, '') === name.toLowerCase()))?.text ?? '';
+  const values: Record<string, string> = {
+    formName: input.formName,
+    submissionId: input.submissionId,
+    submissionDate: input.submittedAt ? new Date(input.submittedAt).toISOString().slice(0, 10) : '',
+    firstName: field('firstName'),
+    lastName: field('lastName'),
+    email: field('email'),
+    siteName: '',
+    currentDate: new Date().toISOString().slice(0, 10),
+  };
+  return value.replace(/\{\{(formName|submissionId|submissionDate|firstName|lastName|email|siteName|currentDate)\}\}/g,
+    (_, key: string) => values[key] ?? '');
 }
 
 export async function renderPdf(input: PdfInput): Promise<Uint8Array> {
@@ -62,11 +87,16 @@ export async function renderPdf(input: PdfInput): Promise<Uint8Array> {
     if (pdf.getPageCount() >= MAX_PAGES) throw new Error('PDF_PAGE_LIMIT');
     page = pdf.addPage([width, height]);
     y = height - margin;
-    page.drawText(safeLatin(input.template.title || input.formName), { x: margin, y, size: 17, font: bold, color: rgb(0.08, 0.15, 0.22) });
-    y -= 22;
+    for (const line of wrappedLines(templateValue(input, input.template.title || input.formName), bold, 17, width - margin * 2)) {
+      page.drawText(line || ' ', { x: margin, y, size: 17, font: bold, color: rgb(0.08, 0.15, 0.22) });
+      y -= 22;
+    }
     if (input.template.subtitle) {
-      page.drawText(safeLatin(input.template.subtitle), { x: margin, y, size: 10, font, color: rgb(0.35, 0.4, 0.45) });
-      y -= 18;
+      for (const line of wrappedLines(templateValue(input, input.template.subtitle), font, 10, width - margin * 2)) {
+        page.drawText(line || ' ', { x: margin, y, size: 10, font, color: rgb(0.35, 0.4, 0.45) });
+        y -= 15;
+      }
+      y -= 3;
     }
     page.drawLine({ start: { x: margin, y }, end: { x: width - margin, y }, thickness: 1, color: rgb(0.8, 0.84, 0.87) });
     y -= 24;
@@ -80,13 +110,18 @@ export async function renderPdf(input: PdfInput): Promise<Uint8Array> {
     page!.drawText(safeLatin(answer.label), { x: margin, y, size: 10, font: bold, color: rgb(0.13, 0.2, 0.27) });
     y -= 17;
     if (answer.kind === 'text') {
-      for (const line of wrappedLines(answer.text || '—', font, 10, width - margin * 2)) {
+      for (const line of wrappedLines(answer.text || '-', font, 10, width - margin * 2)) {
         ensureSpace(15);
         page!.drawText(line || ' ', { x: margin, y, size: 10, font, color: rgb(0.22, 0.27, 0.31) });
         y -= 15;
       }
     } else {
       const files = answer.files ?? [];
+      let column = 0;
+      let rowHeight = 0;
+      const columns = answer.kind === 'image' ? input.template.imageColumns ?? 1 : 1;
+      const gap = 10;
+      const cellWidth = (width - margin * 2 - gap * (columns - 1)) / columns;
       for (const file of files) {
         if (answer.kind === 'file') {
           ensureSpace(16);
@@ -102,21 +137,28 @@ export async function renderPdf(input: PdfInput): Promise<Uint8Array> {
           const isJpg = bytes[0] === 255 && bytes[1] === 216;
           if (!isPng && !isJpg) throw new Error('IMAGE_FORMAT_UNSUPPORTED');
           const image = isPng ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes);
-          const maxWidth = answer.kind === 'signature' ? Math.min(input.template.signatureWidth ?? 230, width - margin * 2) : (width - margin * 2) / (input.template.imageColumns ?? 1);
+          const maxWidth = answer.kind === 'signature' ? Math.min(input.template.signatureWidth ?? 230, width - margin * 2) : cellWidth;
           const maxHeight = answer.kind === 'signature' ? 95 : 250;
           const scale = Math.min(maxWidth / image.width, maxHeight / image.height, 1);
           const imageHeight = image.height * scale;
-          ensureSpace(imageHeight + 8);
-          page!.drawImage(image, { x: margin, y: y - imageHeight, width: image.width * scale, height: imageHeight });
-          y -= imageHeight + 8;
+          if (column === 0) ensureSpace(maxHeight + 8);
+          page!.drawImage(image, { x: margin + column * (cellWidth + gap), y: y - imageHeight, width: image.width * scale, height: imageHeight });
+          rowHeight = Math.max(rowHeight, imageHeight);
+          column++;
+          if (column === columns) {
+            y -= rowHeight + 8;
+            column = 0;
+            rowHeight = 0;
+          }
         }
       }
+      if (column) y -= rowHeight + 8;
     }
     y -= 16;
   }
   for (const [index, current] of pdf.getPages().entries()) {
-    const footer = `${input.template.footer || ''}  ${index + 1} / ${pdf.getPageCount()}`.trim();
-    current.drawText(safeLatin(footer), { x: margin, y: 26, size: 8, font, color: rgb(0.4, 0.45, 0.5) });
+    const footer = `${templateValue(input, input.template.footer || '')}  ${index + 1} / ${pdf.getPageCount()}`.trim();
+    current.drawText(safeLatin(footer).slice(0, 180), { x: margin, y: 26, size: 8, font, color: rgb(0.4, 0.45, 0.5) });
   }
   return pdf.save();
 }

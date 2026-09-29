@@ -26,8 +26,14 @@ function displayText(value: unknown): string {
 function labelFromField(field: UnknownRecord): string | undefined {
   const input = record(field.inputOptions);
   if (!input) return undefined;
+  const direct = input.label;
+  if (typeof direct === 'string' && direct.trim()) return direct.trim();
   const options = Object.values(input).map(record).filter((item): item is UnknownRecord => item !== null);
   for (const option of options) {
+    const optionLabel = option.label;
+    if (typeof optionLabel === 'string' && optionLabel.trim()) return optionLabel.trim();
+    const optionLabelObject = record(optionLabel);
+    if (optionLabelObject && typeof optionLabelObject.text === 'string' && optionLabelObject.text.trim()) return optionLabelObject.text.trim();
     for (const component of Object.values(option).map(record).filter((item): item is UnknownRecord => item !== null)) {
       const label = component.label;
       if (typeof label === 'string' && label.trim()) return label.trim();

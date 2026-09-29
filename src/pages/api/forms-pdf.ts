@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { auth } from '@wix/essentials';
-import { browseSubmissions, configureForm, createExportZip, deleteTemplate, downloadExportZip, downloadPdf, duplicateTemplate, generateSubmissionPdf, getBillingStatus, getCheckoutUrl, getOverview, saveTemplate, setAppLocale, setDefaultTemplate, submissionDetails } from '../../lib/forms-pdf/service';
+import { browseSubmissions, configureForm, createExportZip, deleteTemplate, downloadExportZip, downloadPdf, duplicateTemplate, generateSubmissionPdf, getBillingStatus, getCheckoutUrl, getExportJob, getOverview, retryAutomation, saveTemplate, setAppLocale, setDefaultTemplate, submissionDetails } from '../../lib/forms-pdf/service';
 
 function id(value: unknown): string {
   if (typeof value !== 'string' || !/^[\w-]{6,128}$/.test(value)) throw new Error('ID_INVALID');
@@ -35,6 +35,7 @@ export const GET: APIRoute = async ({ request }) => {
       return Response.json({ url: await downloadPdf(instanceId, recordId, url.searchParams.get('inline') === '1') });
     }
     if (op === 'zip-download') return Response.json({ url: await downloadExportZip(instanceId, id(url.searchParams.get('id'))) });
+    if (op === 'zip-status') return Response.json(await getExportJob(instanceId, id(url.searchParams.get('id'))));
     if (op === 'billing') return Response.json(await getBillingStatus(instanceId));
     throw new Error('UNKNOWN_OPERATION');
   } catch (error) {
@@ -61,6 +62,10 @@ export const POST: APIRoute = async ({ request }) => {
     }
     if (body.op === 'locale' && typeof body.locale === 'string') return Response.json(await setAppLocale(instanceId, body.locale));
     if (body.op === 'zip') return Response.json(await createExportZip(instanceId, body.recordIds as string[]));
+    if (body.op === 'retry' && (body.kind === 'event' || body.kind === 'action')) {
+      if (body.confirmed !== true) throw new Error('CONFIRMATION_REQUIRED');
+      return Response.json(await retryAutomation(instanceId, body.kind, id(body.id)));
+    }
     if (body.op === 'checkout' && (body.plan === 'pro' || body.plan === 'business')) return Response.json({ url: await getCheckoutUrl(body.plan) });
     throw new Error('UNKNOWN_OPERATION');
   } catch (error) {

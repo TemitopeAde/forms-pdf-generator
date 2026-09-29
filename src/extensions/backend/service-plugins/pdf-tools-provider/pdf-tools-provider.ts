@@ -1,5 +1,5 @@
 import { toolsProvider } from '@wix/app-tools/service-plugins';
-import { browseSubmissions, canUseFeature, configureForm, createExportZip, deleteTemplate, downloadExportZip, downloadPdf, duplicateTemplate, generateSubmissionPdf, getBillingStatus, getCheckoutUrl, getOverview, saveTemplate, setAppLocale, setDefaultTemplate, STARTER_TEMPLATES, submissionDetails } from '../../../../lib/forms-pdf/service';
+import { browseSubmissions, canUseFeature, configureForm, createExportZip, deleteTemplate, downloadExportZip, downloadPdf, duplicateTemplate, generateSubmissionPdf, getBillingStatus, getCheckoutUrl, getExportJob, getOverview, retryAutomation, saveTemplate, setAppLocale, setDefaultTemplate, STARTER_TEMPLATES, submissionDetails } from '../../../../lib/forms-pdf/service';
 
 function id(value: unknown, name: string): string {
   if (typeof value !== 'string' || !/^[\w-]{6,128}$/.test(value)) throw new Error(`${name}_INVALID`);
@@ -65,20 +65,33 @@ toolsProvider.provideHandlers({
       const recordIds = payload.recordIds.map((value: unknown) => id(value, 'RECORD_ID'));
       return { response: { job: await createExportZip(instanceId, recordIds) } };
     }
+    if (method === 'getZipJob') return { response: { job: await getExportJob(instanceId, id(payload.jobId, 'JOB_ID')) } };
     if (method === 'getZipDownload') return { response: { url: await downloadExportZip(instanceId, id(payload.jobId, 'JOB_ID')), expiresInMinutes: 5 } };
     if (method === 'configureAutomation') {
       confirmed(payload);
       const formId = id(payload.formId, 'FORM_ID');
-      const settings: { templateId?: string; automatic?: boolean } = {};
+      const settings: { templateId?: string; automatic?: boolean; delivery?: Record<string, unknown> } = {};
       if (payload.templateId !== undefined) settings.templateId = id(payload.templateId, 'TEMPLATE_ID');
       if (payload.automatic !== undefined) {
         if (typeof payload.automatic !== 'boolean') throw new Error('AUTOMATIC_INVALID');
         settings.automatic = payload.automatic;
       }
+      if (payload.delivery !== undefined) {
+        if (!payload.delivery || typeof payload.delivery !== 'object' || Array.isArray(payload.delivery)) throw new Error('DELIVERY_INVALID');
+        settings.delivery = payload.delivery as Record<string, unknown>;
+      }
       if (!Object.keys(settings).length) throw new Error('SETTINGS_REQUIRED');
       return { response: { settings: await configureForm(instanceId, formId, settings) } };
     }
-    if (method === 'listAutomationLogs') return { response: { logs: (await getOverview(instanceId)).logs } };
+    if (method === 'listAutomationLogs') {
+      const overview = await getOverview(instanceId);
+      return { response: { events: overview.logs, actions: overview.actions } };
+    }
+    if (method === 'retryAutomation') {
+      confirmed(payload);
+      if (payload.kind !== 'event' && payload.kind !== 'action') throw new Error('KIND_INVALID');
+      return { response: { record: await retryAutomation(instanceId, payload.kind, id(payload.recordId, 'RECORD_ID')) } };
+    }
     if (method === 'getSettings') return { response: { settings: (await getOverview(instanceId)).settings } };
     if (method === 'setLanguage') {
       confirmed(payload);
